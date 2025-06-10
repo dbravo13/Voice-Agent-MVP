@@ -10,6 +10,7 @@ import websockets.server
 from pydub import AudioSegment
 
 from supabase import create_client, Client
+from google.generativeai import embed_content
 
 
 SUPABASE_URL = "https://fuxqxjwbpbwourkblhte.supabase.co"
@@ -22,14 +23,13 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 # Load API key from environment
 os.environ['GOOGLE_API_KEY'] = 'AIzaSyDU_3Wlr-sJXqplSqxXFMvcchBPbehY4SI'
 gemini_api_key = os.environ['GOOGLE_API_KEY']
-MODEL = "gemini-2.0-flash-live-001"  # For multimodal
+MODEL = "gemini-2.0-flash-live-001"  
 
 client = genai.Client(
   http_options={
     'api_version': 'v1alpha',
   }
 )
-# ==== FUNCIONES AUXILIARES ====
 
 def load_previous_session_handle():
     try:
@@ -45,28 +45,24 @@ def save_previous_session_handle(handle):
         json.dump({'previous_session_handle': handle}, f)
 
 def get_embedding(text: str):
-    model = genai.GenerativeModel("embedding-001")
-    res = model.embed_content(
+    result = embed_content(
+        model="models/embedding-001",
         content=text,
-        task_type="RETRIEVAL_DOCUMENT",
+        task_type="retrieval_document",
         title="Consulta del usuario"
     )
-    return res["embedding"]
+    return result.embedding
 
 def buscar_productos_similares(texto):
     embedding = get_embedding(texto)
-    vector_str = str(embedding).replace('[', '{').replace(']', '}')
-    query = f"""
-        SELECT id, name, description, specs, brand
-        FROM products
-        ORDER BY embedding <-> '{vector_str}'::vector
-        LIMIT 5;
-    """
-    response = supabase.rpc("execute_sql", {"sql": query}).execute()
+    response = supabase.rpc("buscar_productos_por_embedding", {
+        "input_embedding": embedding
+    }).execute()
+
+
     return response.data
 
 
-# ==== SESIÓN PRINCIPAL GEMINI ====
 
 previous_session_handle = load_previous_session_handle()
 
@@ -76,20 +72,20 @@ async def gemini_session_handler(websocket: WebSocketServerProtocol):
         config_message = await websocket.recv()
         config_data = json.loads(config_message)
 
-        config = types.LiveConnectConfig(
-            response_modalities=["AUDIO"],
-            speech_config=types.SpeechConfig(
-                voice_config=types.VoiceConfig(
-                    prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Kore")
-                ),
-                language_code='es-ES',
-            ),
-            system_instruction="You are a helpful assistant.",
-            session_resumption=types.SessionResumptionConfig(
-                handle=previous_session_handle
-            ),
-            output_audio_transcription=types.AudioTranscriptionConfig()
-        )
+        config = {
+            "response_modalities": ["AUDIO"],
+            "input_audio_transcription": {},  
+            "output_audio_transcription": {}, 
+            "speech_config": {
+                "voice_config": {
+                    "prebuilt_voice_config": {"voice_name": "Kore"}
+                },
+                "language_code": "es-ES"
+            },
+            "system_instruction": "You are a helpful assistant.",
+            "session_resumption": {"handle": previous_session_handle}
+        }
+
 
         async with client.aio.live.connect(model=MODEL, config=config) as session:
 
@@ -102,6 +98,7 @@ async def gemini_session_handler(websocket: WebSocketServerProtocol):
                             if "realtime_input" in data:
                                 for chunk in data["realtime_input"]["media_chunks"]:
                                     if chunk["mime_type"] == "audio/pcm":
+
                                         await session.send(input={
                                             "mime_type": "audio/pcm",
                                             "data": chunk["data"]
@@ -137,6 +134,7 @@ async def gemini_session_handler(websocket: WebSocketServerProtocol):
                             async for response in session.receive():
 
                                 if response.server_content and getattr(response.server_content, 'interrupted', None):
+                                    print("Session interrupted by Gemini.")
                                     await websocket.send(json.dumps({"interrupted": "True"}))
                                     continue
 
@@ -169,6 +167,21 @@ async def gemini_session_handler(websocket: WebSocketServerProtocol):
                                                 "finished": sc.input_transcription.finished
                                             }
                                         }))
+
+                                        texto_transcrito = sc.input_transcription.text.lower()
+                                        palabras_clave_map = {
+                                            "laptops": ["laptop", "laptops", "notebook", "portátil"],
+                                            "gaming": ["gaming", "juegos", "videojuegos"],
+                                            "audio": ["audio", "sonido", "parlantes", "speakers"],
+                                            "auriculares": ["auriculares", "audífonos", "headphones"],
+                                            "mouse": ["mouse", "ratón"],
+                                        }
+
+                                        for categoria, keywords in palabras_clave_map.items():
+                                            if any(keyword in texto_transcrito for keyword in keywords):
+                                                resultados = buscar_productos_similares(categoria)
+                                                await websocket.send(json.dumps({"productos_similares": resultados}))
+                                            break
 
                                     if sc.model_turn:
                                         for part in sc.model_turn.parts:

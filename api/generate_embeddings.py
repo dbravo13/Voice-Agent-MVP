@@ -10,7 +10,6 @@ SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJ
 genai.configure(api_key=GOOGLE_API_KEY)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# Función de embedding
 def get_embedding(text: str):
     result = genai.embed_content(
         model="models/embedding-001",
@@ -19,12 +18,10 @@ def get_embedding(text: str):
     )
     return list(result["embedding"])
 
-# Obtener productos
 response = supabase.table("products").select("*").execute()
 productos = response.data
 print(f"🔍 Productos encontrados: {len(productos)}")
 
-# Loop de generación y actualización
 for prod in productos:
     print(f"🔎 ID={prod.get('id')} | Tiene embedding: {prod.get('embedding') is not None}")
     if prod.get("embedding") is None:
